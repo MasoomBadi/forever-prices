@@ -1,7 +1,8 @@
 """Hourly WoW Forever auction prices for Companion for WoW Forever.
 
-Pulls every Forever auction house from Blizzard's Game Data API (US and EU), boils each one down to a few numbers per
-item, and uploads one small file per region and ruleset to the app's server over FTPS.
+Pulls every Forever auction house (its own list and its commodities) from Blizzard's Game Data API (US and EU),
+boils each one down to a few numbers per item, and uploads one small file per region and ruleset to the app's
+server over FTPS.
 
     python3 -I prices.py             pull and upload (the GitHub Actions job)
     python3 -I prices.py --dry-run   pull and write out/ only, nothing uploaded
@@ -105,6 +106,16 @@ def get(region: str, token: str, path: str) -> tuple[dict, str | None]:
         return json.loads(body), r.headers.get("Last-Modified")
 
 
+def get_or_empty(region: str, token: str, path: str) -> dict:
+    """An auction list, or none when the house has no such list (404)."""
+    try:
+        return get(region, token, path)[0]
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return {}
+        raise
+
+
 def summarize(auctions: list[dict]) -> dict[str, list[int]]:
     """Per item: [lowest unit price, quantity-weighted median unit price, total quantity, listings], prices in copper."""
     by_item: dict[int, list[tuple[float, int]]] = {}
@@ -143,10 +154,15 @@ def pull(region: str, token: str, live_rulesets: set[int]) -> dict[str, bytes]:
         doc = {"v": FORMAT_VERSION, "region": region, "ruleset": name, "generated": now, "houses": {}}
         for faction, house in houses.items():
             started = time.time()
-            data, modified = get(region, token, f"/data/wow/ruleset/{ruleset_id}/auctions/{house}")
-            items = summarize(data.get("auctions") or [])
+            base = f"/data/wow/ruleset/{ruleset_id}/auctions/{house}"
+            # Gear and other single items are the house's own list; stackable goods (cloth, herbs, potions) are its
+            # separate commodities list. No item is in both.
+            data, modified = get(region, token, base)
+            commodities = get_or_empty(region, token, f"{base}/commodities")
+            listings = (data.get("auctions") or []) + (commodities.get("auctions") or [])
+            items = summarize(listings)
             doc["houses"][faction] = {"id": house, "updated": iso(modified), "items": items}
-            print(f"  {region} {name} {faction}: {len(data.get('auctions') or [])} listings, {len(items)} items, "
+            print(f"  {region} {name} {faction}: {len(listings)} listings, {len(items)} items, "
                   f"{time.time() - started:.1f}s", flush=True)
         raw = json.dumps(doc, separators=(",", ":")).encode()
         files[f"{region}-{name}.json.gz"] = gzip.compress(raw, mtime=0)
