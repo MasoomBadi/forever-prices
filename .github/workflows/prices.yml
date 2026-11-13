@@ -1,0 +1,41 @@
+# Hourly auction prices for Companion for WoW Forever.
+#
+# Safety rules (keep them when editing):
+#   - Runs only on its schedule or by hand. Never add pull_request / pull_request_target / push triggers:
+#     those can hand the secrets to code from a branch or a fork.
+#   - No third-party actions. The only action is GitHub's own checkout, pinned to a full commit SHA.
+#   - The job's GitHub token can only read this repo, and checkout doesn't keep it on disk.
+#   - Secrets reach only the one step that needs them, as environment variables. Nothing prints them;
+#     prices.py masks the access token Blizzard returns and scrubs secrets out of any error it prints.
+#   - Never turn on `set -x`, step debug logging, or upload artifacts from this job.
+name: prices
+
+on:
+  schedule:
+    - cron: "35 * * * *"  # Blizzard refreshes the auction houses about :17 past the hour
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prices
+  cancel-in-progress: false
+
+jobs:
+  prices:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Pull prices and upload
+        env:
+          BLIZZARD_CLIENT_ID: ${{ secrets.BLIZZARD_CLIENT_ID }}
+          BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+        run: python3 -I prices.py
