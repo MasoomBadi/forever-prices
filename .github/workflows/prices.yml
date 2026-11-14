@@ -8,6 +8,8 @@
 #   - Secrets reach only the one step that needs them, as environment variables. Nothing prints them;
 #     prices.py masks the access token Blizzard returns and scrubs secrets out of any error it prints.
 #   - Never turn on `set -x`, step debug logging, or upload artifacts from this job.
+#   - The secrets live only in the `prices` environment, which only the main branch can use. Keep them out of
+#     the repository-level secrets.
 name: prices
 
 on:
@@ -25,6 +27,7 @@ concurrency:
 jobs:
   prices:
     runs-on: ubuntu-latest
+    environment: prices
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
