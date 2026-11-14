@@ -1,6 +1,6 @@
 # forever-prices
 
-Private. Every hour a GitHub Actions job pulls the WoW Forever auction houses (US and EU, every ruleset and
+Every hour a GitHub Actions job pulls the WoW Forever auction houses (US and EU, every ruleset and
 faction) from Blizzard's Game Data API, keeps a few numbers per item (lowest and median unit price, quantity,
 listings), and uploads one small gzipped JSON file per region and ruleset to the app's server
 (`public/prices/<region>-<ruleset>.json.gz`).
@@ -9,11 +9,13 @@ listings), and uploads one small gzipped JSON file per region and ruleset to the
 python3 -I prices.py --dry-run   # pull and write out/ only (needs BLIZZARD_CLIENT_ID / BLIZZARD_CLIENT_SECRET)
 ```
 
-## Secrets (Settings > Secrets and variables > Actions)
+## Secrets (Settings > Environments > prices)
 
-`BLIZZARD_CLIENT_ID`, `BLIZZARD_CLIENT_SECRET`, `FTP_HOST`, `FTP_USER`, `FTP_PASS`. They live only there:
-never in a file, a commit, an issue, or a log. The safety rules for the job are at the top of
-`.github/workflows/prices.yml`.
+`BLIZZARD_CLIENT_ID`, `BLIZZARD_CLIENT_SECRET`, `FTP_HOST`, `FTP_USER`, `FTP_PASS`. They live only in the
+`prices` environment, which only the main branch can use: never in a file, a commit, an issue, a log, or the
+repository-level secrets. The safety rules for the job are at the top of `.github/workflows/prices.yml`.
+
+Pull requests from outside are not accepted.
 
 ## Blizzard's API terms
 
