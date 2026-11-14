@@ -5,7 +5,12 @@ boils each one down to a few numbers per item, and uploads one small file per re
 server over FTPS.
 
     python3 -I prices.py             pull and upload (the GitHub Actions job)
+    python3 -I prices.py --force     pull and upload even if the server's prices are fresh
     python3 -I prices.py --dry-run   pull and write out/ only, nothing uploaded
+
+GitHub starts scheduled jobs when it can and drops many of them, so the job is scheduled four times an hour and a
+scheduled run quits early while the server's prices are under FRESH_MINUTES old: about one upload an hour, with
+three spare chances when GitHub skips one. Runs started by hand always go ahead.
 
 Secrets come only from the environment: BLIZZARD_CLIENT_ID, BLIZZARD_CLIENT_SECRET, FTP_HOST, FTP_USER, FTP_PASS.
 Nothing here ever prints them, the access token Blizzard hands back is masked in the GitHub log, and any error is
@@ -58,6 +63,10 @@ SITE = os.environ.get("PRICES_SITE", "https://forever.masoombadi.top")
 HISTORY_DAYS = 30
 PAUSE_BETWEEN_READS = 1.0  # seconds between history downloads, gentle on the host
 PAUSE_BETWEEN_UPLOADS = 2.0  # seconds; the host's firewall blocks bursts of connections
+# A scheduled run skips while the server's prices are newer than this (runs come every 15 minutes).
+FRESH_MINUTES = 45
+# The file whose age stands for all of them (every run uploads all regions and rulesets together).
+FRESHNESS_FILE = "us-normal.json.gz"
 OUT = Path(__file__).resolve().parent / "out"
 
 _SECRETS: list[str] = []
@@ -189,6 +198,19 @@ def read_site(path: str) -> bytes | None:
         raise
 
 
+def minutes_old(path: str) -> float | None:
+    """How long ago the server's copy of a price file was replaced (one HEAD request); None when unknown."""
+    req = urllib.request.Request(f"{SITE}/prices/{path}", method="HEAD", headers={"User-Agent": "forever-prices-job", "Cache-Control": "no-cache"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            modified = r.headers.get("Last-Modified")
+        if not modified:
+            return None
+        return (datetime.now(timezone.utc) - parsedate_to_datetime(modified)).total_seconds() / 60
+    except (urllib.error.URLError, OSError, ValueError, TypeError):
+        return None  # can't tell: go ahead and pull
+
+
 def add_day(old: dict | None, today: str, prices: dict[str, int]) -> dict:
     """The history with [prices] as [today]'s column: days older than HISTORY_DAYS go, items with no price left go."""
     days = list(old["days"]) if old else []
@@ -263,7 +285,15 @@ def upload(files: dict[str, bytes], host: str, user: str, password: str) -> None
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--dry-run", action="store_true", help="write out/ only, upload nothing")
+    parser.add_argument("--force", action="store_true", help="pull and upload even if the server's prices are fresh")
     args = parser.parse_args()
+
+    # a scheduled run quits early while the last upload is recent; a run started by hand always goes ahead
+    if not args.dry_run and not args.force and os.environ.get("GITHUB_EVENT_NAME") == "schedule":
+        age = minutes_old(FRESHNESS_FILE)
+        if age is not None and age < FRESH_MINUTES:
+            print(f"prices on the server are {age:.0f} min old (under {FRESH_MINUTES}): nothing to do", flush=True)
+            return 0
 
     client_id, client_secret = env("BLIZZARD_CLIENT_ID"), env("BLIZZARD_CLIENT_SECRET")
     ftp_login = None if args.dry_run else (env("FTP_HOST"), env("FTP_USER"), env("FTP_PASS"))

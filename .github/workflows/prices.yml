@@ -14,7 +14,9 @@ name: prices
 
 on:
   schedule:
-    - cron: "35 * * * *"  # Blizzard refreshes the auction houses about :17 past the hour
+    # Blizzard refreshes the auction houses about :17 past the hour. GitHub drops many scheduled runs, so the job
+    # is due four times an hour and prices.py skips a run while the server's prices are under 45 minutes old.
+    - cron: "5,20,35,50 * * * *"
   workflow_dispatch: {}
 
 permissions:

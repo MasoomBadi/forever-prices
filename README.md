@@ -1,6 +1,6 @@
 # forever-prices
 
-Every hour a GitHub Actions job pulls the WoW Forever auction houses (US and EU, every ruleset and
+About every hour a GitHub Actions job pulls the WoW Forever auction houses (US and EU, every ruleset and
 faction) from Blizzard's Game Data API, keeps a few numbers per item (lowest and median unit price, quantity,
 listings), and uploads one small gzipped JSON file per region and ruleset to the app's server
 (`public/prices/<region>-<ruleset>.json.gz`).
