@@ -10,7 +10,9 @@ server over FTPS.
 
 GitHub starts scheduled jobs when it can and drops many of them, so the job is scheduled four times an hour and a
 scheduled run quits early while the server's prices are under FRESH_MINUTES old: about one upload an hour, with
-three spare chances when GitHub skips one. Runs started by hand always go ahead.
+three spare chances when GitHub skips one. GitHub's schedule can still go hours without a run, so the app server's
+cron also starts the workflow four times an hour (workflow_dispatch with from=cron, PRICES_TRIGGER=cron), and those
+runs skip the same way. Runs started by hand always go ahead.
 
 Secrets come only from the environment: BLIZZARD_CLIENT_ID, BLIZZARD_CLIENT_SECRET, FTP_HOST, FTP_USER, FTP_PASS.
 Nothing here ever prints them, the access token Blizzard hands back is masked in the GitHub log, and any error is
@@ -288,8 +290,9 @@ def main() -> int:
     parser.add_argument("--force", action="store_true", help="pull and upload even if the server's prices are fresh")
     args = parser.parse_args()
 
-    # a scheduled run quits early while the last upload is recent; a run started by hand always goes ahead
-    if not args.dry_run and not args.force and os.environ.get("GITHUB_EVENT_NAME") == "schedule":
+    # a scheduled or server-cron run quits early while the last upload is recent; a run started by hand always goes
+    scheduled = os.environ.get("GITHUB_EVENT_NAME") == "schedule" or os.environ.get("PRICES_TRIGGER") == "cron"
+    if not args.dry_run and not args.force and scheduled:
         age = minutes_old(FRESHNESS_FILE)
         if age is not None and age < FRESH_MINUTES:
             print(f"prices on the server are {age:.0f} min old (under {FRESH_MINUTES}): nothing to do", flush=True)

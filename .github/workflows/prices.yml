@@ -1,8 +1,9 @@
 # Hourly auction prices for Companion for WoW Forever.
 #
 # Safety rules (keep them when editing):
-#   - Runs only on its schedule or by hand. Never add pull_request / pull_request_target / push triggers:
-#     those can hand the secrets to code from a branch or a fork.
+#   - Runs only on its schedule, by hand, or from the app server's cron (a workflow_dispatch with from=cron, sent
+#     with a fine-grained token that can only start this repo's workflows). Never add pull_request /
+#     pull_request_target / push triggers: those can hand the secrets to code from a branch or a fork.
 #   - No third-party actions. The only action is GitHub's own checkout, pinned to a full commit SHA.
 #   - The job's GitHub token can only read this repo, and checkout doesn't keep it on disk.
 #   - Secrets reach only the one step that needs them, as environment variables. Nothing prints them;
@@ -16,8 +17,16 @@ on:
   schedule:
     # Blizzard refreshes the auction houses about :17 past the hour. GitHub drops many scheduled runs, so the job
     # is due four times an hour and prices.py skips a run while the server's prices are under 45 minutes old.
+    # The app server's cron starts the same run four times an hour too (from=cron), since GitHub's schedule can go
+    # hours without starting one.
     - cron: "5,20,35,50 * * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      from:
+        description: "hand = always pull; cron = skip while prices are fresh"
+        type: choice
+        options: [hand, cron]
+        default: hand
 
 permissions:
   contents: read
@@ -43,4 +52,5 @@ jobs:
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_USER: ${{ secrets.FTP_USER }}
           FTP_PASS: ${{ secrets.FTP_PASS }}
+          PRICES_TRIGGER: ${{ inputs.from }}
         run: python3 -I prices.py
