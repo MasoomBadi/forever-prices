@@ -49,8 +49,6 @@ jobs:
         env:
           BLIZZARD_CLIENT_ID: ${{ secrets.BLIZZARD_CLIENT_ID }}
           BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
-          FTP_HOST: ${{ secrets.FTP_HOST }}
-          FTP_USER: ${{ secrets.FTP_USER }}
-          FTP_PASS: ${{ secrets.FTP_PASS }}
+          PRICES_UPLOAD_KEY: ${{ secrets.PRICES_UPLOAD_KEY }}
           PRICES_TRIGGER: ${{ inputs.from }}
         run: python3 -I prices.py
