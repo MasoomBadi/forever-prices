@@ -60,6 +60,14 @@ FRESH_MINUTES = 45
 # The file whose age stands for all of them (every run uploads all regions and rulesets together).
 FRESHNESS_FILE = "us-normal.json.gz"
 OUT = Path(__file__).resolve().parent / "out"
+# The host's firewall now and then stalls one GitHub runner's IP for the whole run while other runners get through
+# (2026-11-18: a run timed out on every request while one started two minutes later uploaded fine). A scheduled or
+# server-cron run that can't reach the server stops with a warning instead of failing; the next run, on another
+# runner, does the upload. Runs started by hand still fail.
+UPLOAD_RETRY_SECONDS = 20
+# Blizzard reads: tries per document, and the pause before each retry (times the try number).
+GET_TRIES = 3
+GET_RETRY_SECONDS = 5
 
 _SECRETS: list[str] = []
 
@@ -102,16 +110,35 @@ def access_token(client_id: str, client_secret: str) -> str:
 
 
 def get(region: str, token: str, path: str) -> tuple[dict, str | None]:
+    """
+    One Game Data API document. Blizzard now and then cuts a big auction list off halfway (2026-11-18: "Compressed
+    file ended before the end-of-stream marker"), drops the connection or answers 5xx/429 for a moment: those are
+    tried again, up to GET_TRIES times with a pause. A 4xx answer (404: no such list) is returned at once.
+    """
     q = urllib.parse.urlencode({"namespace": f"dynamic-forever-{region}", "locale": "en_US"})
     req = urllib.request.Request(
         f"https://{region}.api.blizzard.com{path}?{q}",
         headers={"Authorization": f"Bearer {token}", "Accept-Encoding": "gzip"},
     )
-    with urllib.request.urlopen(req, timeout=120) as r:
-        body = r.read()
-        if r.headers.get("Content-Encoding") == "gzip":
-            body = gzip.decompress(body)
-        return json.loads(body), r.headers.get("Last-Modified")
+    for attempt in range(1, GET_TRIES + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                body = r.read()
+                if r.headers.get("Content-Encoding") == "gzip":
+                    body = gzip.decompress(body)
+                return json.loads(body), r.headers.get("Last-Modified")
+        except urllib.error.HTTPError as e:
+            if (e.code < 500 and e.code != 429) or attempt == GET_TRIES:
+                raise
+            problem = f"HTTP {e.code}"
+        except (EOFError, gzip.BadGzipFile, http.client.IncompleteRead, http.client.HTTPException, ValueError,
+                urllib.error.URLError, OSError) as e:
+            if attempt == GET_TRIES:
+                raise
+            problem = type(e).__name__
+        print(f"  {region} {path}: {problem}, trying again ({attempt}/{GET_TRIES - 1})", flush=True)
+        time.sleep(GET_RETRY_SECONDS * attempt)
+    raise AssertionError("unreachable")
 
 
 def get_or_empty(region: str, token: str, path: str) -> dict:
@@ -220,6 +247,16 @@ class Site:
         self.conn.close()
 
 
+class Unreachable(Exception):
+    """The app's server didn't answer this runner: a timeout or a refused or dropped connection, not an HTTP error."""
+
+
+def unreachable(e: BaseException) -> bool:
+    return isinstance(e, (TimeoutError, ConnectionError, http.client.RemoteDisconnected, ssl.SSLError)) or (
+        isinstance(e, OSError) and not isinstance(e, urllib.error.HTTPError) and e.errno is not None
+    )
+
+
 def read_site(site: Site, path: str) -> bytes | None:
     """A file from the app's server; None when it isn't there yet."""
     status, _, body = site.request("GET", f"/prices/{path}")
@@ -231,14 +268,19 @@ def read_site(site: Site, path: str) -> bytes | None:
 
 
 def minutes_old(site: Site, path: str) -> float | None:
-    """How long ago the server's copy of a price file was replaced (one HEAD request); None when unknown."""
+    """
+    How long ago the server's copy of a price file was replaced (one HEAD request); None when unknown. Raises
+    Unreachable when the server doesn't answer at all.
+    """
     try:
         status, headers, _ = site.request("HEAD", f"/prices/{path}")
         modified = headers.get("Last-Modified") if status == 200 else None
         if not modified:
             return None
         return (datetime.now(timezone.utc) - parsedate_to_datetime(modified)).total_seconds() / 60
-    except (OSError, http.client.HTTPException, ValueError, TypeError):
+    except (OSError, http.client.HTTPException, ValueError, TypeError) as e:
+        if unreachable(e):
+            raise Unreachable(f"{type(e).__name__}: {e}") from None
         return None  # can't tell: go ahead and pull
 
 
@@ -297,7 +339,21 @@ def upload(site: Site, files: dict[str, bytes], key: str) -> None:
         size += len(part)
     for parts in batches:
         body = b"".join(parts)
-        status, _, answer = site.request("POST", UPLOAD_PATH, body, {"X-Upload-Key": key, "Content-Type": "application/octet-stream"})
+        headers = {"X-Upload-Key": key, "Content-Type": "application/octet-stream"}
+        try:
+            status, _, answer = site.request("POST", UPLOAD_PATH, body, headers)
+        except (OSError, http.client.HTTPException) as e:
+            if not unreachable(e):
+                raise
+            # one more try on a fresh connection after a pause; the page writes nothing unless the whole request arrives
+            print(f"  upload didn't get through ({scrub(type(e).__name__)}), trying again in {UPLOAD_RETRY_SECONDS} s", flush=True)
+            time.sleep(UPLOAD_RETRY_SECONDS)
+            try:
+                status, _, answer = site.request("POST", UPLOAD_PATH, body, headers)
+            except (OSError, http.client.HTTPException) as again:
+                if unreachable(again):
+                    raise Unreachable(f"{type(again).__name__}: {again}") from None
+                raise
         text = scrub(answer.decode("utf-8", "replace").strip())[:300]
         if status != 200:
             raise OSError(f"upload: HTTP {status}: {text}")
@@ -314,7 +370,11 @@ def main() -> int:
     # a scheduled or server-cron run quits early while the last upload is recent; a run started by hand always goes
     scheduled = os.environ.get("GITHUB_EVENT_NAME") == "schedule" or os.environ.get("PRICES_TRIGGER") == "cron"
     if not args.dry_run and not args.force and scheduled:
-        age = minutes_old(site, FRESHNESS_FILE)
+        try:
+            age = minutes_old(site, FRESHNESS_FILE)
+        except Unreachable as e:
+            # no point pulling from Blizzard when the upload can't get through from this runner
+            return skip_unreachable(e)
         if age is not None and age < FRESH_MINUTES:
             print(f"prices on the server are {age:.0f} min old (under {FRESH_MINUTES}): nothing to do", flush=True)
             return 0
@@ -334,7 +394,7 @@ def main() -> int:
             region_files, region_typical = pull(region, token, live)
             files.update(region_files)
             typical.update(region_typical)
-        except (urllib.error.URLError, OSError, ValueError, KeyError) as e:
+        except (urllib.error.URLError, OSError, ValueError, KeyError, EOFError, http.client.HTTPException) as e:
             # one region failing leaves its old files on the server; the other region still goes up
             failed.append(region)
             print(f"{region} failed: {scrub(f'{type(e).__name__}: {e}')}", flush=True)
@@ -351,9 +411,21 @@ def main() -> int:
             (OUT / name).write_bytes(body)
         print(f"dry run: wrote {len(files)} files to {OUT}", flush=True)
     elif files:
-        upload(site, files, upload_key)
+        try:
+            upload(site, files, upload_key)
+        except Unreachable as e:
+            site.close()
+            if scheduled:
+                return skip_unreachable(e)
+            raise
     site.close()
     return 1 if failed else 0
+
+
+def skip_unreachable(e: Unreachable) -> int:
+    """A scheduled run whose runner can't reach the server: a warning in the log, not a failed run."""
+    print(f"::warning::the app server didn't answer this runner ({scrub(str(e))}); skipped, the next run uploads", flush=True)
+    return 0
 
 
 if __name__ == "__main__":
