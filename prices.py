@@ -198,16 +198,23 @@ class Site:
         h = {"User-Agent": "forever-prices-job", "Cache-Control": "no-cache", **(headers or {})}
         reused = self.conn.sock is not None
         try:
-            self.conn.request(method, self.prefix + path, body=body, headers=h)
-            r = self.conn.getresponse()
+            return self._exchange(method, path, body, h)
         except ConnectionError:
-            self.conn.close()
             if not reused:
                 raise
             # the host closed the kept-open connection while we were busy with Blizzard: open it once more
+            return self._exchange(method, path, body, h)
+
+    def _exchange(self, method: str, path: str, body: bytes | None, h: dict):
+        try:
             self.conn.request(method, self.prefix + path, body=body, headers=h)
             r = self.conn.getresponse()
-        return r.status, r.headers, r.read()
+            return r.status, r.headers, r.read()
+        except Exception:
+            # a failed or timed-out exchange leaves the connection half-used ("Request-sent"): drop it, so the next
+            # request opens a fresh one instead of failing too
+            self.conn.close()
+            raise
 
     def close(self):
         self.conn.close()
